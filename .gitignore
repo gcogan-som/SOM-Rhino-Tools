@@ -19,6 +19,11 @@ Release/
 *.lib
 *.exp
 
+# C# / .NET
+bin/
+obj/
+packages/
+
 # Rhino
 Rhino*.sln
 *.vcxproj.filters
