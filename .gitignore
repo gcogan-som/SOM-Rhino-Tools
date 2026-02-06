@@ -1,0 +1,29 @@
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+*.vcxproj.user
+x64/
+Debug/
+Release/
+*.pdb
+*.ilk
+*.obj
+*.log
+
+# Build output
+*.rhp
+*.dll
+*.lib
+*.exp
+
+# Rhino
+Rhino*.sln
+*.vcxproj.filters
+
+# IDE
+.idea/
+*.swp
+*~
