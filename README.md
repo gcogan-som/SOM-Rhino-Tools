@@ -1,6 +1,6 @@
 # SOM Rhino Tools
 
-Rhino 3D plugin (.rhp) with SOM-standard commands for file handling and block insertion. Integrates with [DriveGuard](https://github.com/skidmore-owings-merrill/DriveGuard) for Google Drive read-only protection.
+Rhino 3D plugin (.rhp) with SOM-standard commands for file handling and block insertion. Integrates with [DriveGuard](https://github.com/gcogan-som/DriveGuard) for Google Drive read-only protection.
 
 ## Commands
 
