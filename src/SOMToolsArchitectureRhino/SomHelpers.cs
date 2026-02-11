@@ -1,10 +1,45 @@
 using System;
 using System.IO;
 using System.Net;
+using System.Text;
 using Rhino;
 
 namespace SOMToolsArchitectureRhino
 {
+    /// <summary>
+    /// Lock info returned by GetFileLockInfo. Contains details about who has the file locked.
+    /// </summary>
+    public class FileLockInfo
+    {
+        /// <summary>True if the file is locked by anyone (rhl or DriveGuard metadata).</summary>
+        public bool IsLocked { get; set; }
+
+        /// <summary>True if the .rhl lock was created by the current machine (i.e. this user).</summary>
+        public bool IsLockedByMe { get; set; }
+
+        /// <summary>Machine name from the .rhl file, or null if no .rhl.</summary>
+        public string RhlMachine { get; set; }
+
+        /// <summary>Display name of the lock owner from DriveGuard, or null if unavailable.</summary>
+        public string LockedByName { get; set; }
+
+        /// <summary>Email of the lock owner from DriveGuard, or null if unavailable.</summary>
+        public string LockedByEmail { get; set; }
+
+        /// <summary>Human-readable description of who has the lock.</summary>
+        public string Description
+        {
+            get
+            {
+                if (!IsLocked) return null;
+                if (!string.IsNullOrEmpty(LockedByName)) return LockedByName;
+                if (!string.IsNullOrEmpty(RhlMachine))
+                    return IsLockedByMe ? "you (this machine)" : "another user (" + RhlMachine + ")";
+                return "another user";
+            }
+        }
+    }
+
     /// <summary>
     /// Helpers for .rhl lock files and optional DriveGuard integration.
     /// Plugin works standalone (lock files only) or enhanced when DriveGuard is running (metadata too).
@@ -37,37 +72,98 @@ namespace SOMToolsArchitectureRhino
             }
         }
 
-        /// <summary>Returns true if filename.3dm.rhl exists in the same folder as the given file. Works with or without DriveGuard.</summary>
-        public static bool RhlExists(string filePath)
+        /// <summary>Returns the .rhl path for a given file.</summary>
+        public static string GetRhlPath(string filePath)
         {
-            if (string.IsNullOrWhiteSpace(filePath)) return false;
+            if (string.IsNullOrWhiteSpace(filePath)) return null;
             try
             {
                 string dir = Path.GetDirectoryName(filePath);
                 string name = Path.GetFileName(filePath);
-                string rhlPath = Path.Combine(dir, name + ".rhl");
-                return File.Exists(rhlPath);
+                return Path.Combine(dir, name + ".rhl");
             }
             catch
             {
-                return false;
+                return null;
             }
+        }
+
+        /// <summary>Returns true if filename.3dm.rhl exists in the same folder as the given file.</summary>
+        public static bool RhlExists(string filePath)
+        {
+            string rhlPath = GetRhlPath(filePath);
+            return rhlPath != null && File.Exists(rhlPath);
+        }
+
+        /// <summary>
+        /// Reads the .rhl lock file and returns the machine name that created the lock.
+        /// Rhino writes the computer's NetBIOS name into the .rhl file.
+        /// Returns null if no .rhl exists or it cannot be read.
+        /// </summary>
+        public static string GetRhlMachineName(string filePath)
+        {
+            string rhlPath = GetRhlPath(filePath);
+            if (rhlPath == null || !File.Exists(rhlPath)) return null;
+            try
+            {
+                // .rhl files contain the machine name as a null-terminated string
+                // followed by possible binary data. Read raw bytes and extract
+                // the printable portion.
+                byte[] bytes = File.ReadAllBytes(rhlPath);
+                if (bytes.Length == 0) return null;
+
+                // Build string from printable ASCII/extended chars, stop at first null
+                var sb = new StringBuilder();
+                foreach (byte b in bytes)
+                {
+                    if (b == 0) break;
+                    if (b >= 32 && b < 127)
+                        sb.Append((char)b);
+                }
+                string name = sb.ToString().Trim();
+                return string.IsNullOrEmpty(name) ? null : name;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Returns true if the .rhl lock was created by this machine (i.e. the current user).
+        /// Returns false if no .rhl exists or it was created by a different machine.
+        /// </summary>
+        public static bool IsRhlOwnedByMe(string filePath)
+        {
+            string rhlMachine = GetRhlMachineName(filePath);
+            if (string.IsNullOrEmpty(rhlMachine)) return false;
+            string myMachine = Environment.MachineName;
+            return rhlMachine.Equals(myMachine, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
         /// Returns true if DriveGuard reports the file as locked (e.g. shared-drive metadata).
         /// Returns false if DriveGuard is not installed, not running, or the request fails. Never throws.
-        /// Only call for paths where IsGoogleDrivePath is true if you want to avoid unnecessary requests.
         /// </summary>
         public static bool IsFileLockedByDriveGuard(string filePath)
         {
-            if (string.IsNullOrWhiteSpace(filePath)) return false;
+            var info = GetDriveGuardLockInfo(filePath);
+            return info != null && info.IsLocked;
+        }
+
+        /// <summary>
+        /// Queries DriveGuard for detailed lock info (locked_by name, email, etc.).
+        /// Returns null if DriveGuard is not running or the request fails. Never throws.
+        /// </summary>
+        public static FileLockInfo GetDriveGuardLockInfo(string filePath)
+        {
+            if (string.IsNullOrWhiteSpace(filePath)) return null;
             string baseUrl = DriveGuardApiBase?.Trim();
-            if (string.IsNullOrEmpty(baseUrl)) return false;
+            if (string.IsNullOrEmpty(baseUrl)) return null;
             try
             {
                 string pathEncoded = Uri.EscapeDataString(filePath);
-                string url = baseUrl.TrimEnd('/') + "/api/is-file-locked?path=" + pathEncoded;
+                string url = baseUrl.TrimEnd('/') + "/api/is-file-locked?path=" + pathEncoded + "&details=true";
                 var req = (HttpWebRequest)WebRequest.Create(url);
                 req.Method = "GET";
                 req.Timeout = Math.Max(500, DriveGuardTimeoutMs);
@@ -75,23 +171,95 @@ namespace SOMToolsArchitectureRhino
                 req.KeepAlive = false;
                 using (var resp = (HttpWebResponse)req.GetResponse())
                 {
-                    if (resp.StatusCode != HttpStatusCode.OK) return false;
+                    if (resp.StatusCode != HttpStatusCode.OK) return null;
                     using (var reader = new StreamReader(resp.GetResponseStream()))
                     {
-                        string body = reader.ReadToEnd()?.Trim().ToUpperInvariant();
-                        return body == "TRUE" || body == "1" || body == "YES";
+                        string body = reader.ReadToEnd()?.Trim();
+                        if (string.IsNullOrEmpty(body)) return null;
+                        // Parse simple JSON: {"locked":true,"locked_by":"Name","locked_by_email":"email"}
+                        return ParseLockInfoJson(body);
                     }
                 }
             }
             catch
             {
-                return false;
+                return null;
             }
         }
 
+        /// <summary>Minimal JSON parser for lock info (avoids Newtonsoft dependency).</summary>
+        private static FileLockInfo ParseLockInfoJson(string json)
+        {
+            if (string.IsNullOrWhiteSpace(json)) return null;
+            // Handle plain text "true"/"false" responses (backwards compat)
+            string upper = json.Trim().ToUpperInvariant();
+            if (upper == "TRUE" || upper == "FALSE")
+                return new FileLockInfo { IsLocked = upper == "TRUE" };
+
+            var info = new FileLockInfo();
+            info.IsLocked = json.Contains("\"locked\":true") || json.Contains("\"locked\": true");
+            info.LockedByName = ExtractJsonString(json, "locked_by");
+            info.LockedByEmail = ExtractJsonString(json, "locked_by_email");
+            return info;
+        }
+
+        /// <summary>Extract a string value from JSON by key (simple, no nested objects).</summary>
+        private static string ExtractJsonString(string json, string key)
+        {
+            string pattern = "\"" + key + "\":\"";
+            int start = json.IndexOf(pattern, StringComparison.Ordinal);
+            if (start < 0)
+            {
+                pattern = "\"" + key + "\": \"";
+                start = json.IndexOf(pattern, StringComparison.Ordinal);
+            }
+            if (start < 0) return null;
+            start += pattern.Length;
+            int end = json.IndexOf("\"", start, StringComparison.Ordinal);
+            if (end < 0) return null;
+            string val = json.Substring(start, end - start).Trim();
+            return string.IsNullOrEmpty(val) ? null : val;
+        }
+
         /// <summary>
-        /// Returns true if the file should be opened read-only: .rhl exists and/or (for drive paths) DriveGuard reports locked.
-        /// Standalone: only .rhl is used. With DriveGuard running: also considers shared-drive metadata. Never fails if DriveGuard is absent.
+        /// Get comprehensive lock info for a file: checks .rhl + DriveGuard.
+        /// Returns a FileLockInfo with all available details.
+        /// Works standalone (rhl only) or enhanced with DriveGuard (name, email).
+        /// </summary>
+        public static FileLockInfo GetFileLockInfo(string filePath)
+        {
+            var info = new FileLockInfo();
+
+            // 1. Check .rhl
+            string rhlMachine = GetRhlMachineName(filePath);
+            if (rhlMachine != null)
+            {
+                info.IsLocked = true;
+                info.RhlMachine = rhlMachine;
+                info.IsLockedByMe = rhlMachine.Equals(
+                    Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+            }
+
+            // 2. Check DriveGuard API for richer info (name, email)
+            if (IsGoogleDrivePath(filePath))
+            {
+                var dgInfo = GetDriveGuardLockInfo(filePath);
+                if (dgInfo != null && dgInfo.IsLocked)
+                {
+                    info.IsLocked = true;
+                    if (!string.IsNullOrEmpty(dgInfo.LockedByName))
+                        info.LockedByName = dgInfo.LockedByName;
+                    if (!string.IsNullOrEmpty(dgInfo.LockedByEmail))
+                        info.LockedByEmail = dgInfo.LockedByEmail;
+                }
+            }
+
+            return info;
+        }
+
+        /// <summary>
+        /// Returns true if the file should be opened read-only.
+        /// Standalone: only .rhl is used. With DriveGuard: also considers shared-drive metadata.
         /// </summary>
         public static bool IsFileLocked(string filePath)
         {
